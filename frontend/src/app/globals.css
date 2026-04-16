@@ -1,179 +1,215 @@
 @import "tailwindcss";
 
-/* =========================
-   Theme Variables
-========================= */
 :root {
-  --background: 0 0% 100%;
-  --foreground: 220 15% 12%;
-  --card: 0 0% 100%;
-  --border: 220 13% 91%;
-  --muted: 220 14% 96%;
-  --muted-foreground: 220 8% 46%;
-  --primary: 221 83% 53%;
-  --radius: 14px;
+  color-scheme: dark;
+  --background: 0 0% 5%;
+  --foreground: 0 0% 96%;
+  --card: 0 0% 9%;
+  --card-foreground: 0 0% 96%;
+  --secondary: 0 0% 12%;
+  --secondary-foreground: 0 0% 94%;
+  --muted: 0 0% 14%;
+  --muted-foreground: 0 0% 62%;
+  --border: 0 0% 17%;
+  --input: 0 0% 13%;
+  --ring: 188 84% 53%;
+  --primary: 281 87% 65%;
+  --primary-foreground: 0 0% 100%;
+  --success: 160 67% 46%;
+  --success-foreground: 0 0% 100%;
+  --destructive: 0 72% 57%;
+  --destructive-foreground: 0 0% 100%;
+  --radius: 22px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: 220 15% 7%;
-    --foreground: 0 0% 98%;
-    --card: 220 15% 10%;
-    --border: 220 14% 18%;
-    --muted: 220 14% 15%;
-    --muted-foreground: 220 8% 60%;
-    --primary: 217 91% 60%;
-  }
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
 }
 
-/* =========================
-   Base Layout (Apple Style)
-========================= */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  border-color: hsl(var(--border));
+}
+
+html,
 body {
-  background: hsl(var(--background));
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top left, rgba(168, 85, 247, 0.1), transparent 28%),
+    radial-gradient(circle at top right, rgba(34, 211, 238, 0.08), transparent 26%),
+    linear-gradient(180deg, #0d0d0f 0%, #0a0a0a 100%);
   color: hsl(var(--foreground));
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-    Inter, Helvetica, Arial, sans-serif;
+  font-family:
+    var(--font-geist-sans),
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "Segoe UI",
+    Inter,
+    Helvetica,
+    Arial,
+    sans-serif;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* =========================
-   App Container
-========================= */
-#root {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 1.5rem;
+a {
+  color: inherit;
+  text-decoration: none;
 }
 
-/* =========================
-   Typography
-========================= */
-h1 {
-  font-size: 2rem;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+button,
+input,
+textarea {
+  font: inherit;
 }
 
-h2 {
-  font-size: 1.25rem;
-  font-weight: 600;
+::selection {
+  background: rgba(168, 85, 247, 0.28);
+  color: hsl(var(--foreground));
 }
 
-p {
-  color: hsl(var(--muted-foreground));
-  font-size: 0.95rem;
+.glass {
+  background: rgba(18, 18, 21, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow:
+    0 24px 48px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-/* =========================
-   Cards (Telegram / Apple)
-========================= */
+.glass-card {
+  background:
+    linear-gradient(180deg, rgba(26, 26, 31, 0.88), rgba(12, 12, 15, 0.92));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  box-shadow:
+    0 28px 70px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.gradient-text {
+  background-image: linear-gradient(135deg, #a855f7 0%, #7c3aed 45%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.scrollbar-hide {
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
 .card {
-  background: hsl(var(--card));
-  border: 1px solid hsl(var(--border));
+  background: linear-gradient(180deg, rgba(24, 24, 28, 0.9), rgba(14, 14, 18, 0.94));
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--radius);
   padding: 1.25rem;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow:
+    0 20px 44px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  transition: transform 180ms ease, box-shadow 180ms ease;
 }
 
 .card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
-}
-
-/* =========================
-   Buttons (Apple-like)
-========================= */
-.btn-primary {
-  background: hsl(var(--primary));
-  color: white;
-  border-radius: 999px;
-  padding: 0.55rem 1.1rem;
-  font-size: 0.9rem;
-  font-weight: 500;
-  transition: opacity 0.15s ease, transform 0.15s ease;
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
   transform: translateY(-1px);
+  box-shadow:
+    0 24px 52px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-.btn-secondary {
-  background: hsl(var(--muted));
-  color: hsl(var(--foreground));
-  border-radius: 999px;
-  padding: 0.55rem 1.1rem;
-  font-size: 0.9rem;
-}
-
-/* =========================
-   Logo / Icon (Minimal)
-========================= */
 .logo {
   height: 3.5rem;
   transition: transform 0.2s ease;
 }
 
 .logo:hover {
-  transform: scale(1.05);
+  transform: scale(1.03);
 }
 
-/* =========================
-   Soft Animations
-========================= */
-@keyframes fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.fade-in {
-  animation: fade-in 0.4s ease forwards;
-}
-
-/* =========================
-   Utility
-========================= */
 .muted {
   color: hsl(var(--muted-foreground));
 }
 
 .divider {
   height: 1px;
-  background: hsl(var(--border));
+  background: rgba(255, 255, 255, 0.06);
   margin: 1rem 0;
 }
 
-/* =========================
-   Disappearing message effect
-   ========================= */
 .disappearing {
-  animation: dissolve 5s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
+  animation: dissolve 4.6s cubic-bezier(0.22, 0.61, 0.36, 1) forwards;
   will-change: opacity, transform, filter;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2.2s ease-in-out infinite;
 }
 
 @keyframes dissolve {
   0% {
     opacity: 1;
-    transform: scale(1);
+    transform: translateY(0) scale(1);
     filter: blur(0px);
   }
-  50% {
+  55% {
     opacity: 0.5;
-    transform: scale(0.95);
-    filter: blur(2px);
+    transform: translateY(2px) scale(0.985);
+    filter: blur(1px);
   }
   100% {
     opacity: 0;
-    transform: scale(0.9);
-    filter: blur(6px);
+    transform: translateY(6px) scale(0.96);
+    filter: blur(5px);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 rgba(168, 85, 247, 0),
+      0 0 0 rgba(34, 211, 238, 0);
+  }
+  50% {
+    box-shadow:
+      0 0 0 8px rgba(168, 85, 247, 0.08),
+      0 0 0 16px rgba(34, 211, 238, 0.04);
+  }
+}
+
+@media (max-width: 768px) {
+  body {
+    background:
+      radial-gradient(circle at top center, rgba(168, 85, 247, 0.08), transparent 30%),
+      linear-gradient(180deg, #0d0d0f 0%, #0a0a0a 100%);
   }
 }
