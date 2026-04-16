@@ -1,15 +1,23 @@
-import { createPublicClient, createWalletClient, custom, http } from "viem";
+import {
+  BrowserProvider,
+  Contract,
+  JsonRpcProvider,
+  WebSocketProvider,
+  type ContractEventPayload,
+  type Eip1193Provider,
+} from "ethers";
 import { sepolia } from "viem/chains";
 import type { Address } from "./encryption";
 
 const PLACEHOLDER_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+const DEBUG_PREFIX = "[chatlock:blockchain]";
+const SEPOLIA_CHAIN_ID = BigInt(sepolia.id);
+const SEPOLIA_CHAIN_HEX = `0x${sepolia.id.toString(16)}`;
 
 const MESSENGER_CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_MESSENGER_CONTRACT_ADDRESS as Address | undefined) ||
-  // Placeholder – must be replaced with your deployed contract address
   PLACEHOLDER_ADDRESS;
 
-// ABI for DecentralizedMessenger
 export const MESSENGER_ABI = [
   {
     type: "event",
@@ -60,49 +68,104 @@ export interface OnChainMessage {
   expirationTimestamp: bigint;
 }
 
+export interface MessageSentEvent {
+  sender: Address;
+  receiver: Address;
+  cid: string;
+  blockNumber?: number;
+  transactionHash?: string;
+}
+
+type ReadProvider = JsonRpcProvider | WebSocketProvider;
+
+let readProvider: ReadProvider | null = null;
+let readContract: Contract | null = null;
+
+function normalizeAddress(address: string): Address {
+  return address.toLowerCase() as Address;
+}
+
 function getRpcUrl() {
   return process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL || sepolia.rpcUrls.default.http[0];
 }
 
-function getPublicClient() {
-  return createPublicClient({
-    chain: sepolia,
-    transport: http(getRpcUrl()),
-  });
+function getWsRpcUrl() {
+  return process.env.NEXT_PUBLIC_SEPOLIA_WS_RPC_URL;
 }
 
-function getWalletClient() {
-  if (typeof window === "undefined" || !(window as any).ethereum) {
+function getInjectedProvider(): Eip1193Provider {
+  const provider = (window as Window & { ethereum?: Eip1193Provider }).ethereum;
+  if (!provider) {
     throw new Error("No injected Ethereum provider found (MetaMask required)");
   }
 
-  return createWalletClient({
-    chain: sepolia,
-    transport: custom((window as any).ethereum),
+  return provider;
+}
+
+function getReadProvider(): ReadProvider {
+  if (readProvider) {
+    return readProvider;
+  }
+
+  const network = { chainId: sepolia.id, name: sepolia.name.toLowerCase() };
+  const wsRpcUrl = getWsRpcUrl();
+
+  if (wsRpcUrl) {
+    readProvider = new WebSocketProvider(wsRpcUrl, network);
+    console.debug(DEBUG_PREFIX, "Initialized read provider", {
+      chainId: sepolia.id,
+      contractAddress: MESSENGER_CONTRACT_ADDRESS,
+      transport: "websocket",
+      rpcUrl: wsRpcUrl,
+    });
+    return readProvider;
+  }
+
+  readProvider = new JsonRpcProvider(getRpcUrl(), network);
+  readProvider.pollingInterval = 4000;
+  console.debug(DEBUG_PREFIX, "Initialized read provider", {
+    chainId: sepolia.id,
+    contractAddress: MESSENGER_CONTRACT_ADDRESS,
+    transport: "http",
+    rpcUrl: getRpcUrl(),
+    pollingInterval: readProvider.pollingInterval,
   });
+  return readProvider;
+}
+
+function getReadContract(): Contract {
+  if (!readContract) {
+    readContract = new Contract(
+      MESSENGER_CONTRACT_ADDRESS,
+      MESSENGER_ABI,
+      getReadProvider()
+    );
+  }
+
+  return readContract;
+}
+
+function getBrowserProvider(): BrowserProvider {
+  return new BrowserProvider(getInjectedProvider(), sepolia.id);
 }
 
 async function ensureSepoliaNetwork(): Promise<void> {
-  if (typeof window === "undefined" || !(window as any).ethereum) {
-    throw new Error("No injected Ethereum provider found (MetaMask required)");
-  }
-
-  const provider = (window as any).ethereum;
-  const targetChainHex = "0xaa36a7"; // 11155111 (Sepolia)
+  const provider = getInjectedProvider();
 
   try {
     await provider.request({
       method: "wallet_switchEthereumChain",
-      params: [{ chainId: targetChainHex }],
+      params: [{ chainId: SEPOLIA_CHAIN_HEX }],
     });
-  } catch (error: any) {
-    // 4902 = unknown chain in wallet
-    if (error?.code === 4902) {
+  } catch (error: unknown) {
+    const switchError = error as { code?: number };
+
+    if (switchError?.code === 4902) {
       await provider.request({
         method: "wallet_addEthereumChain",
         params: [
           {
-            chainId: targetChainHex,
+            chainId: SEPOLIA_CHAIN_HEX,
             chainName: "Sepolia",
             nativeCurrency: {
               name: "Sepolia Ether",
@@ -116,7 +179,16 @@ async function ensureSepoliaNetwork(): Promise<void> {
       });
       return;
     }
+
     throw new Error("Please switch MetaMask to Sepolia to send messages.");
+  }
+}
+
+function assertContractConfigured() {
+  if (MESSENGER_CONTRACT_ADDRESS === PLACEHOLDER_ADDRESS) {
+    throw new Error(
+      "Messenger contract address is not configured. Set NEXT_PUBLIC_MESSENGER_CONTRACT_ADDRESS."
+    );
   }
 }
 
@@ -125,92 +197,139 @@ export async function sendMessageOnChain(
   cid: string,
   expirationTimestampMs: number
 ): Promise<`0x${string}`> {
-  if (MESSENGER_CONTRACT_ADDRESS === PLACEHOLDER_ADDRESS) {
-    throw new Error(
-      "Messenger contract address is not configured. Set NEXT_PUBLIC_MESSENGER_CONTRACT_ADDRESS."
-    );
-  }
-
+  assertContractConfigured();
   await ensureSepoliaNetwork();
 
-  const walletClient = getWalletClient();
-  const [account] = await walletClient.getAddresses();
+  const browserProvider = getBrowserProvider();
+  const signer = await browserProvider.getSigner();
+  const network = await browserProvider.getNetwork();
 
+  if (network.chainId !== SEPOLIA_CHAIN_ID) {
+    throw new Error("Wallet is not connected to Sepolia.");
+  }
+
+  const sender = normalizeAddress(await signer.getAddress());
   const expirationSeconds = BigInt(Math.floor(expirationTimestampMs / 1000));
+  const contract = new Contract(MESSENGER_CONTRACT_ADDRESS, MESSENGER_ABI, signer);
 
-  const hash = await walletClient.writeContract({
-    address: MESSENGER_CONTRACT_ADDRESS,
-    abi: MESSENGER_ABI,
-    functionName: "sendMessage",
-    args: [receiver, cid, expirationSeconds],
-    account,
+  console.debug(DEBUG_PREFIX, "Sending message", {
+    sender,
+    receiver,
+    cid,
+    chainId: network.chainId.toString(),
+    contractAddress: MESSENGER_CONTRACT_ADDRESS,
+    expirationSeconds: expirationSeconds.toString(),
   });
 
-  return hash;
+  const tx = await contract.sendMessage(receiver, cid, expirationSeconds);
+  console.debug(DEBUG_PREFIX, "Transaction submitted", {
+    hash: tx.hash,
+    contractAddress: MESSENGER_CONTRACT_ADDRESS,
+  });
+
+  const receipt = await tx.wait();
+  console.debug(DEBUG_PREFIX, "Transaction confirmed", {
+    hash: tx.hash,
+    blockNumber: receipt?.blockNumber,
+    status: receipt?.status,
+  });
+
+  return tx.hash as `0x${string}`;
 }
 
 export async function fetchMessagesForUser(user: Address): Promise<OnChainMessage[]> {
   if (MESSENGER_CONTRACT_ADDRESS === PLACEHOLDER_ADDRESS) {
     console.warn(
+      DEBUG_PREFIX,
       "Messenger contract address is not configured. Returning empty message list."
     );
     return [];
   }
 
-  const publicClient = getPublicClient();
+  const provider = getReadProvider();
+  const network = await provider.getNetwork();
+  console.debug(DEBUG_PREFIX, "Fetching messages", {
+    user,
+    chainId: network.chainId.toString(),
+    contractAddress: MESSENGER_CONTRACT_ADDRESS,
+  });
 
-  const result = (await publicClient.readContract({
-    address: MESSENGER_CONTRACT_ADDRESS,
-    abi: MESSENGER_ABI,
-    functionName: "getMessages",
-    args: [user],
-  })) as any[];
+  const result = (await getReadContract().getMessages(user)) as Array<{
+    sender: string;
+    receiver: string;
+    cid: string;
+    timestamp: bigint;
+    expirationTimestamp: bigint;
+  }>;
 
-  return result.map((m) => ({
-    sender: m.sender as Address,
-    receiver: m.receiver as Address,
-    cid: m.cid as string,
-    timestamp: BigInt(m.timestamp),
-    expirationTimestamp: BigInt(m.expirationTimestamp),
-  }));
+  return result
+    .map((message) => ({
+      sender: normalizeAddress(message.sender),
+      receiver: normalizeAddress(message.receiver),
+      cid: message.cid,
+      timestamp: BigInt(message.timestamp),
+      expirationTimestamp: BigInt(message.expirationTimestamp),
+    }))
+    .sort((left, right) => {
+      if (left.timestamp === right.timestamp) {
+        return left.cid.localeCompare(right.cid);
+      }
+      return left.timestamp < right.timestamp ? -1 : 1;
+    });
 }
 
 export function watchNewMessages(
-  user: Address,
-  onMessage: (args: { sender: Address; receiver: Address; cid: string }) => void
+  onMessage: (event: MessageSentEvent) => void | Promise<void>
 ): () => void {
   if (MESSENGER_CONTRACT_ADDRESS === PLACEHOLDER_ADDRESS) {
     console.warn(
+      DEBUG_PREFIX,
       "Messenger contract address is not configured. Skipping event subscription."
     );
     return () => {};
   }
 
-  const publicClient = getPublicClient();
+  const provider = getReadProvider();
+  void provider
+    .getNetwork()
+    .then((network) => {
+      console.debug(DEBUG_PREFIX, "Subscribing to MessageSent", {
+        chainId: network.chainId.toString(),
+        contractAddress: MESSENGER_CONTRACT_ADDRESS,
+      });
+    })
+    .catch((error) => {
+      console.error(DEBUG_PREFIX, "Failed to read network for MessageSent watcher", error);
+    });
 
-  const unwatch = publicClient.watchContractEvent({
-    address: MESSENGER_CONTRACT_ADDRESS,
-    abi: MESSENGER_ABI,
-    eventName: "MessageSent",
-    // Filter only logs involving this user
-    args: {
-      // indexed params; `null` means "any"
-      sender: null,
-      receiver: null,
-    },
-    onLogs: (logs) => {
-      for (const log of logs) {
-        const sender = log.args.sender as Address;
-        const receiver = log.args.receiver as Address;
-        const cid = log.args.cid as string;
+  const contract = getReadContract();
+  const listener = (
+    sender: string,
+    receiver: string,
+    cid: string,
+    event: ContractEventPayload
+  ) => {
+    const nextEvent: MessageSentEvent = {
+      sender: normalizeAddress(sender),
+      receiver: normalizeAddress(receiver),
+      cid,
+      blockNumber: event.log.blockNumber,
+      transactionHash: event.log.transactionHash,
+    };
 
-        if (sender === user || receiver === user) {
-          onMessage({ sender, receiver, cid });
-        }
-      }
-    },
-  });
+    console.debug(DEBUG_PREFIX, "MessageSent event received", nextEvent);
 
-  return unwatch;
+    Promise.resolve(onMessage(nextEvent)).catch((error) => {
+      console.error(DEBUG_PREFIX, "MessageSent handler failed", error);
+    });
+  };
+
+  contract.on("MessageSent", listener);
+
+  return () => {
+    contract.off("MessageSent", listener);
+    console.debug(DEBUG_PREFIX, "Unsubscribed from MessageSent", {
+      contractAddress: MESSENGER_CONTRACT_ADDRESS,
+    });
+  };
 }
-

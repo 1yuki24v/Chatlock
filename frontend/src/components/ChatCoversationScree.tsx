@@ -28,6 +28,7 @@ import {
 } from "@/utils/ipfs";
 import {
   fetchMessagesForUser,
+  type OnChainMessage,
   sendMessageOnChain,
   watchNewMessages,
 } from "@/utils/blockchain";
@@ -41,12 +42,15 @@ const EXPIRATION_SECONDS: Record<ExpirationOption, number> = {
   "1h": 60 * 60,
 };
 
+const POLLING_INTERVAL_MS = 8000;
+
 interface Message {
   id: string;
   content: string;
   encryptedPayload?: EncryptedPayload;
   cid?: string;
   time: string;
+  createdAt: number;
   sender: "me" | "them";
   type: "text" | "file" | "image";
   encrypted: boolean;
@@ -61,6 +65,120 @@ const isValidAddress = (value: string): value is Address => {
   return /^0x[a-fA-F0-9]{40}$/.test(value);
 };
 
+const normalizeAddress = (value: string) => value.toLowerCase();
+
+const isSameAddress = (left: string, right: string) => {
+  return normalizeAddress(left) === normalizeAddress(right);
+};
+
+const isConversationMessage = (
+  sender: Address,
+  receiver: Address,
+  me: Address,
+  other: Address
+) => {
+  return (
+    (isSameAddress(sender, me) && isSameAddress(receiver, other)) ||
+    (isSameAddress(sender, other) && isSameAddress(receiver, me))
+  );
+};
+
+const getMessageId = (sender: Address, receiver: Address, cid: string) => {
+  return `${normalizeAddress(sender)}:${normalizeAddress(receiver)}:${cid}`;
+};
+
+const formatMessageTime = (timestampMs: number) => {
+  return new Date(timestampMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+const mergeMessages = (current: Message[], incoming: Message[]) => {
+  const nowMs = Date.now();
+  const byId = new Map<string, Message>();
+
+  for (const message of current) {
+    if (message.expirationTimestamp > nowMs) {
+      byId.set(message.id, message);
+    }
+  }
+
+  for (const message of incoming) {
+    if (message.expirationTimestamp > nowMs) {
+      byId.set(message.id, message);
+    }
+  }
+
+  return Array.from(byId.values()).sort((left, right) => {
+    if (left.createdAt === right.createdAt) {
+      return left.id.localeCompare(right.id);
+    }
+    return left.createdAt - right.createdAt;
+  });
+};
+
+async function hydrateOnChainMessage(
+  message: OnChainMessage,
+  me: Address
+): Promise<Message | null> {
+  const payload = await fetchEncryptedPayload(message.cid);
+  const createdAt = Number(message.timestamp) * 1000;
+  const expirationTimestamp = Math.min(
+    Number(message.expirationTimestamp) * 1000,
+    Number(payload.expiration)
+  );
+
+  if (expirationTimestamp <= Date.now()) {
+    return null;
+  }
+
+  const plaintext = decryptMessage(payload, message.sender, message.receiver);
+
+  return {
+    id: getMessageId(message.sender, message.receiver, message.cid),
+    content: plaintext,
+    encryptedPayload: payload,
+    cid: message.cid,
+    time: formatMessageTime(createdAt),
+    createdAt,
+    sender: isSameAddress(message.sender, me) ? "me" : "them",
+    type: "text",
+    encrypted: true,
+    expirationTimestamp,
+  };
+}
+
+async function hydrateEventMessage(
+  sender: Address,
+  receiver: Address,
+  cid: string,
+  me: Address
+): Promise<Message | null> {
+  const payload = await fetchEncryptedPayload(cid);
+  const expirationTimestamp = Number(payload.expiration);
+
+  if (expirationTimestamp <= Date.now()) {
+    return null;
+  }
+
+  const createdAt = Number(payload.timestamp);
+  const plaintext = decryptMessage(payload, sender, receiver);
+
+  return {
+    id: getMessageId(sender, receiver, cid),
+    content: plaintext,
+    encryptedPayload: payload,
+    cid,
+    time: formatMessageTime(createdAt),
+    createdAt,
+    sender: isSameAddress(sender, me) ? "me" : "them",
+    type: "text",
+    encrypted: true,
+    expirationTimestamp,
+  };
+}
+
 const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
   const router = useRouter();
   const { address } = useAccount();
@@ -70,6 +188,7 @@ const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
   const [expirationOption, setExpirationOption] = useState<ExpirationOption>("5m");
   const [now, setNow] = useState(() => Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<Message[]>([]);
 
   const contact = { address: chatId, name: "Contact" };
 
@@ -77,8 +196,20 @@ const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  const updateMessages = (updater: (prev: Message[]) => Message[]) => {
+    setMessages((prev) => {
+      const next = updater(prev);
+      messagesRef.current = next;
+      return next;
+    });
+  };
+
   useEffect(() => {
     scrollToBottom();
+  }, [messages]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
   }, [messages]);
 
   useEffect(() => {
@@ -90,61 +221,83 @@ const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
 
   // Drop expired messages from UI
   useEffect(() => {
-    setMessages((prev) =>
-      prev.filter((m) => m.expirationTimestamp > now)
-    );
+    updateMessages((prev) => prev.filter((message) => message.expirationTimestamp > now));
   }, [now]);
 
-  // Initial load from blockchain + IPFS
   useEffect(() => {
-    const loadMessages = async () => {
-      if (!address || !isValidAddress(chatId)) return;
+    updateMessages(() => []);
+  }, [address, chatId]);
 
+  // Initial sync + polling fallback
+  useEffect(() => {
+    if (!address || !isValidAddress(chatId)) return;
+
+    const me = address as Address;
+    const other = chatId as Address;
+    let cancelled = false;
+
+    const syncMessages = async (source: "initial" | "poll") => {
       try {
-        const me = address as Address;
-        const other = chatId as Address;
         const onChainMessages = await fetchMessagesForUser(me);
-
-        const relevant = onChainMessages.filter(
-          (m) =>
-            (m.sender === me && m.receiver === other) ||
-            (m.sender === other && m.receiver === me)
+        const relevantMessages = onChainMessages.filter((message) =>
+          isConversationMessage(message.sender, message.receiver, me, other)
+        );
+        const knownMessageIds = new Set(messagesRef.current.map((message) => message.id));
+        const missingMessages = relevantMessages.filter(
+          (message) =>
+            !knownMessageIds.has(getMessageId(message.sender, message.receiver, message.cid))
         );
 
-        const loaded: Message[] = [];
+        console.debug("[chatlock:conversation] Chain sync", {
+          source,
+          wallet: me,
+          peer: other,
+          totalFetched: onChainMessages.length,
+          relevant: relevantMessages.length,
+          missing: missingMessages.length,
+        });
 
-        for (const m of relevant) {
-          try {
-            const payload = await fetchEncryptedPayload(m.cid);
-            const plaintext = decryptMessage(payload, m.sender, m.receiver);
-
-            loaded.push({
-              id: `${m.sender}-${m.timestamp.toString()}-${m.cid}`,
-              content: plaintext,
-              encryptedPayload: payload,
-              cid: m.cid,
-              time: new Date(Number(payload.timestamp)).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-              sender: m.sender === me ? "me" : "them",
-              type: "text",
-              encrypted: true,
-              expirationTimestamp: Number(payload.expiration),
-            });
-          } catch (error) {
-            console.error("Failed to decrypt or load message", error);
-          }
+        if (missingMessages.length === 0) {
+          return;
         }
 
-        loaded.sort((a, b) => a.expirationTimestamp - b.expirationTimestamp);
-        setMessages(loaded);
+        const hydratedMessages = (
+          await Promise.all(
+            missingMessages.map(async (message) => {
+              try {
+                return await hydrateOnChainMessage(message, me);
+              } catch (error) {
+                console.error("Failed to hydrate on-chain message", {
+                  cid: message.cid,
+                  error,
+                });
+                return null;
+              }
+            })
+          )
+        ).filter((message): message is Message => message !== null);
+
+        if (cancelled || hydratedMessages.length === 0) {
+          return;
+        }
+
+        updateMessages((prev) => mergeMessages(prev, hydratedMessages));
       } catch (error) {
-        console.error("Failed to load messages", error);
+        if (!cancelled) {
+          console.error("Failed to sync messages from chain", error);
+        }
       }
     };
 
-    loadMessages();
+    void syncMessages("initial");
+    const intervalId = window.setInterval(() => {
+      void syncMessages("poll");
+    }, POLLING_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, [address, chatId]);
 
   // Real-time updates via MessageSent event
@@ -154,50 +307,27 @@ const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
     const me = address as Address;
     const other = chatId as Address;
 
-    const unwatch = watchNewMessages(me, async ({ sender, receiver, cid }) => {
-      // Only messages in this conversation
-      if (
-        !(
-          (sender === me && receiver === other) ||
-          (sender === other && receiver === me)
-        )
-      ) {
+    const unwatch = watchNewMessages(async ({ sender, receiver, cid, transactionHash }) => {
+      if (!isConversationMessage(sender, receiver, me, other)) {
         return;
       }
 
-      // Skip messages we sent ourselves; they are already in local state
-      if (sender === me) return;
+      console.debug("[chatlock:conversation] Event matched active conversation", {
+        sender,
+        receiver,
+        cid,
+        transactionHash,
+      });
 
       try {
-        const payload = await fetchEncryptedPayload(cid);
-        // If message already expired, skip rendering (contract should filter,
-        // but this keeps the UI consistent in edge cases).
-        if (Number(payload.expiration) <= Date.now()) return;
-        const plaintext = decryptMessage(payload, sender, receiver);
+        const nextMessage = await hydrateEventMessage(sender, receiver, cid, me);
+        if (!nextMessage) {
+          return;
+        }
 
-        setMessages((prev) => {
-          const already = prev.some((m) => m.cid === cid);
-          if (already) return prev;
-
-          const next: Message = {
-            id: `${sender}-${payload.timestamp}-${cid}`,
-            content: plaintext,
-            encryptedPayload: payload,
-            cid,
-            time: new Date(Number(payload.timestamp)).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            }),
-            sender: sender === me ? "me" : "them",
-            type: "text",
-            encrypted: true,
-            expirationTimestamp: Number(payload.expiration),
-          };
-
-          return [...prev, next];
-        });
+        updateMessages((prev) => mergeMessages(prev, [nextMessage]));
       } catch (error) {
-        console.error("Failed to handle incoming MessageSent event", error);
+        console.error("Failed to handle incoming MessageSent event. Polling will retry.", error);
       }
     });
 
@@ -245,21 +375,19 @@ const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
       await sendMessageOnChain(other, cid, payload.expiration);
 
       const message: Message = {
-        id: Date.now().toString(),
+        id: getMessageId(me, other, cid),
         content: newMessage,
         encryptedPayload: payload,
         cid,
-        time: new Date(payload.timestamp).toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
+        time: formatMessageTime(payload.timestamp),
+        createdAt: payload.timestamp,
         sender: "me",
         type: "text",
         encrypted: true,
         expirationTimestamp: payload.expiration,
       };
 
-      setMessages((prev) => [...prev, message]);
+      updateMessages((prev) => mergeMessages(prev, [message]));
       setNewMessage("");
 
       toast({
@@ -273,9 +401,9 @@ const ChatConversationScreen = ({ chatId }: ChatConversationScreenProps) => {
         description: "Could not send the message. Check your wallet and network.",
         variant: "destructive",
       });
+    } finally {
+      setIsSending(false);
     }
-
-    setIsSending(false);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
